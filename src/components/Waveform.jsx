@@ -1,11 +1,9 @@
 import { useEffect, useRef } from 'react';
 
 export default function Waveform({ analyser, color = '#3b82f6', progress = 0, onClick }) {
-  progressRef.current = progress;
   const canvasRef = useRef(null);
   const animRef = useRef(null);
   const staticRef = useRef(null);
-  const progressRef = useRef(progress);
 
   // Draw static background waveform (procedural)
   useEffect(() => {
@@ -66,7 +64,7 @@ export default function Waveform({ analyser, color = '#3b82f6', progress = 0, on
       ctx.clearRect(0, 0, W, H);
 
       // Static bg
-      if (staticRef.current?.draw) staticRef.current.draw(progressRef.current);
+      if (staticRef.current?.draw) staticRef.current.draw(progress);
 
       // Live overlay
       ctx.beginPath();

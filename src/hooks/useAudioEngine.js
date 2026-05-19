@@ -5,25 +5,31 @@ export function useAudioEngine() {
   const decksRef = useRef({});
 
   function getCtx() {
+    if (typeof window === 'undefined') return null;
+
     if (!ctxRef.current) {
       ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
     }
+
     if (ctxRef.current.state === 'suspended') {
       ctxRef.current.resume();
     }
+
     return ctxRef.current;
   }
 
-  async function createReverbIR(ctx, duration = 2.5) {
+  async function createReverbIR(ctx, duration = 2) {
     const sr = ctx.sampleRate;
     const len = sr * duration;
     const buf = ctx.createBuffer(2, len, sr);
+
     for (let c = 0; c < 2; c++) {
-      const d = buf.getChannelData(c);
+      const data = buf.getChannelData(c);
       for (let i = 0; i < len; i++) {
-        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
+        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2);
       }
     }
+
     return buf;
   }
 
@@ -32,11 +38,14 @@ export function useAudioEngine() {
     const arrayBuffer = await file.arrayBuffer();
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
-    if (decksRef.current[deckId]?.source) {
-      try { decksRef.current[deckId].source.stop(); } catch (_) {}
+    const existing = decksRef.current[deckId];
+
+    if (existing?.source) {
+      try {
+        existing.source.stop();
+      } catch (_) {}
     }
 
-    // EQ nodes
     const low = ctx.createBiquadFilter();
     low.type = 'lowshelf';
     low.frequency.value = 320;
@@ -50,44 +59,42 @@ export function useAudioEngine() {
     high.type = 'highshelf';
     high.frequency.value = 3200;
 
-    // Reverb
     const convolver = ctx.createConvolver();
-    createReverbIR(ctx).then(ir => { convolver.buffer = ir; });
+    createReverbIR(ctx).then((ir) => {
+      convolver.buffer = ir;
+    });
+
     const reverbGain = ctx.createGain();
     reverbGain.gain.value = 0;
+
     const dryGain = ctx.createGain();
     dryGain.gain.value = 1;
 
-    // Delay
     const delay = ctx.createDelay(2);
-    delay.delayTime.value = 0.375;
-    const delayFeedback = ctx.createGain();
-    delayFeedback.gain.value = 0;
     const delayWet = ctx.createGain();
-    delayWet.gain.value = 0;
+    const delayFeedback = ctx.createGain();
 
-    // Channel gain (for crossfader)
+    delayWet.gain.value = 0;
+    delayFeedback.gain.value = 0;
+    delay.delayTime.value = 0.32;
+
     const channelGain = ctx.createGain();
     channelGain.gain.value = 1;
 
-    // Analyser for waveform visualization
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
 
-    // Chain: source → low → mid → high → dryGain → channelGain → analyser → destination
-    //                                              → reverbGain → convolver → channelGain
-    //                                              → delayWet → delay → delayFeedback (loop) → channelGain
-
     low.connect(mid);
     mid.connect(high);
-    high.connect(dryGain);
-    high.connect(reverbGain);
-    high.connect(delayWet);
 
+    high.connect(dryGain);
     dryGain.connect(channelGain);
+
+    high.connect(reverbGain);
     reverbGain.connect(convolver);
     convolver.connect(channelGain);
 
+    high.connect(delayWet);
     delayWet.connect(delay);
     delay.connect(delayFeedback);
     delayFeedback.connect(delay);
@@ -99,27 +106,45 @@ export function useAudioEngine() {
     decksRef.current[deckId] = {
       audioBuffer,
       source: null,
-      low, mid, high,
-      reverbGain, dryGain,
-      delay, delayFeedback, delayWet,
+      low,
+      mid,
+      high,
+      reverbGain,
+      dryGain,
+      delayWet,
+      delayFeedback,
       channelGain,
       analyser,
       startTime: 0,
       offset: 0,
       isPlaying: false,
+      duration: audioBuffer.duration,
     };
 
-    return { duration: audioBuffer.duration };
+    return {
+      duration: audioBuffer.duration,
+    };
   }, []);
 
   const play = useCallback((deckId) => {
     const ctx = getCtx();
     const deck = decksRef.current[deckId];
+
     if (!deck || deck.isPlaying) return;
+
+    if (deck.offset >= deck.duration) {
+      deck.offset = 0;
+    }
 
     const source = ctx.createBufferSource();
     source.buffer = deck.audioBuffer;
     source.connect(deck.low);
+
+    const fade = 0.08;
+    deck.channelGain.gain.cancelScheduledValues(ctx.currentTime);
+    deck.channelGain.gain.setValueAtTime(0, ctx.currentTime);
+    deck.channelGain.gain.linearRampToValueAtTime(1, ctx.currentTime + fade);
+
     source.start(0, deck.offset);
 
     deck.source = source;
@@ -127,6 +152,8 @@ export function useAudioEngine() {
     deck.isPlaying = true;
 
     source.onended = () => {
+      if (!deck.isPlaying) return;
+
       deck.isPlaying = false;
       deck.offset = 0;
       deck.source = null;
@@ -136,62 +163,116 @@ export function useAudioEngine() {
   const pause = useCallback((deckId) => {
     const ctx = getCtx();
     const deck = decksRef.current[deckId];
+
     if (!deck || !deck.isPlaying) return;
 
     deck.offset += ctx.currentTime - deck.startTime;
-    try { deck.source.onended = null; deck.source.stop(); } catch (_) {}
+
+    try {
+      deck.channelGain.gain.cancelScheduledValues(ctx.currentTime);
+      deck.channelGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.05);
+      setTimeout(() => {
+        try {
+          deck.source?.stop();
+        } catch (_) {}
+      }, 60);
+    } catch (_) {}
+
     deck.isPlaying = false;
   }, []);
 
   const seek = useCallback((deckId, time) => {
     const deck = decksRef.current[deckId];
     if (!deck) return;
+
+    const safeTime = Math.max(0, Math.min(time, deck.duration));
     const wasPlaying = deck.isPlaying;
-    if (wasPlaying) pause(deckId);
-    deck.offset = time;
-    if (wasPlaying) play(deckId);
-  }, [play, pause]);
+
+    if (wasPlaying) {
+      try {
+        deck.source?.stop();
+      } catch (_) {}
+      deck.isPlaying = false;
+    }
+
+    deck.offset = safeTime;
+
+    if (wasPlaying) {
+      setTimeout(() => play(deckId), 10);
+    }
+  }, [play]);
 
   const getCurrentTime = useCallback((deckId) => {
-    const ctx = ctxRef.current;
     const deck = decksRef.current[deckId];
+    const ctx = ctxRef.current;
+
     if (!deck) return 0;
-    if (!deck.isPlaying) return deck.offset;
+
+    if (!deck.isPlaying) {
+      return deck.offset;
+    }
+
     const current = deck.offset + (ctx.currentTime - deck.startTime);
-    return Math.min(current, deck.audioBuffer?.duration || current);
+
+    if (current >= deck.duration) {
+      deck.isPlaying = false;
+      deck.offset = 0;
+      return deck.duration;
+    }
+
+    return current;
   }, []);
 
   const setEQ = useCallback((deckId, band, gainDb) => {
     const deck = decksRef.current[deckId];
-    if (!deck) return;
-    deck[band].gain.value = gainDb;
+    if (deck?.[band]) {
+      deck[band].gain.value = gainDb;
+    }
   }, []);
 
   const setReverb = useCallback((deckId, wet) => {
     const deck = decksRef.current[deckId];
     if (!deck) return;
+
     deck.reverbGain.gain.value = wet;
-    deck.dryGain.gain.value = 1 - wet * 0.5;
+    deck.dryGain.gain.value = 1 - wet * 0.4;
   }, []);
 
   const setDelay = useCallback((deckId, wet) => {
     const deck = decksRef.current[deckId];
     if (!deck) return;
+
     deck.delayWet.gain.value = wet;
-    deck.delayFeedback.gain.value = wet * 0.5;
+    deck.delayFeedback.gain.value = wet * 0.45;
   }, []);
 
   const setCrossfader = useCallback((value) => {
-    // value: 0 = full deck A, 1 = full deck B
-    const deckA = decksRef.current['A'];
-    const deckB = decksRef.current['B'];
-    if (deckA) deckA.channelGain.gain.value = Math.cos(value * Math.PI / 2);
-    if (deckB) deckB.channelGain.gain.value = Math.cos((1 - value) * Math.PI / 2);
+    const deckA = decksRef.current.A;
+    const deckB = decksRef.current.B;
+
+    if (deckA) {
+      deckA.channelGain.gain.value = Math.cos(value * Math.PI * 0.5);
+    }
+
+    if (deckB) {
+      deckB.channelGain.gain.value = Math.cos((1 - value) * Math.PI * 0.5);
+    }
   }, []);
 
   const getAnalyser = useCallback((deckId) => {
     return decksRef.current[deckId]?.analyser || null;
   }, []);
 
-  return { loadTrack, play, pause, seek, getCurrentTime, setEQ, setReverb, setDelay, setCrossfader, getAnalyser };
+  return {
+    loadTrack,
+    play,
+    pause,
+    seek,
+    getCurrentTime,
+    setEQ,
+    setReverb,
+    setDelay,
+    setCrossfader,
+    getAnalyser,
+  };
 }
