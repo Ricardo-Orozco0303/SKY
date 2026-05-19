@@ -249,7 +249,7 @@ function VUMeter({ analyser, color }) {
 }
 
 /* ─── DECK ─── */
-function Deck({ id, engine, crossfade, onDeckInfo, extEQ, extReverb, extDelay }) {
+function Deck({ id, engine, crossfade, onDeckInfo }) {
   const [trackName, setTrackName] = useState(null);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -265,10 +265,7 @@ function Deck({ id, engine, crossfade, onDeckInfo, extEQ, extReverb, extDelay })
 
   useEffect(() => () => clearInterval(timerRef.current), []);
 
-  // Apply external overrides from automix/AI
-  useEffect(() => { if (extEQ) setEqState(prev => ({...prev, ...extEQ})); }, [JSON.stringify(extEQ)]);
-  useEffect(() => { if (extReverb !== undefined && extReverb !== null) setReverbState(extReverb); }, [extReverb]);
-  useEffect(() => { if (extDelay !== undefined && extDelay !== null) setDelayState(extDelay); }, [extDelay]);
+
 
   useEffect(() => { onDeckInfo(id, { track: trackName, duration, eq, reverb, delay, bpm }); }, [trackName, duration, eq, reverb, delay, bpm]);
 
@@ -372,150 +369,6 @@ function Crossfader({ value, onChange }) {
   );
 }
 
-/* ─── AI PANEL ─── */
-function AIPanel({ decksInfo, crossfade, onApply, onAutomix, automixRunning, automixPhase, automixProgress, onStopAutomix }) {
-  const [messages, setMessages] = useState([
-    { role: "assistant", content: "¡Hola! Soy tu asistente de mezcla IA.\n\nCargá tracks en los decks y te ayudo. Podés pedirme:\n• \"transición suave de A a B\"\n• \"activá el automix\"\n• \"mezcla para medianoche\"\n• \"analizá mis decks\"" }
-  ]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const chatRef = useRef(null);
-
-  useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [messages]);
-
-  // Receive external AI messages from automix
-  const addMsg = useCallback((content, role = "assistant", extra = {}) => {
-    setMessages(prev => [...prev, { role, content, ...extra }]);
-  }, []);
-
-  // Expose addMsg for automix engine
-  useEffect(() => { window.__aiAddMsg = addMsg; }, [addMsg]);
-
-  async function sendMessage() {
-    const userMsg = input.trim() || "Analizá mis decks";
-    if (!input.trim() && !decksInfo.A.track && !decksInfo.B.track) return;
-    setInput(""); addMsg(userMsg, "user"); setLoading(true);
-
-    const hour = new Date().getHours();
-    const timeCtx = hour < 6 ? "madrugada íntima" : hour < 12 ? "mañana fresca" : hour < 18 ? "tarde relajada" : hour < 22 ? "noche calentando" : "medianoche, fiesta en su pico";
-
-    const system = `Eres un DJ experto. Analiza los decks y da consejos o ejecuta automix.
-
-ESTADO:
-- Hora: ${new Date().toLocaleTimeString('es')} (${timeCtx})
-- Deck A: "${decksInfo.A.track||'vacío'}" BPM:${decksInfo.A.bpm||'?'} EQ:L${decksInfo.A.eq.low} M${decksInfo.A.eq.mid} H${decksInfo.A.eq.high} Rev:${Math.round(decksInfo.A.reverb*100)}% Del:${Math.round(decksInfo.A.delay*100)}%
-- Deck B: "${decksInfo.B.track||'vacío'}" BPM:${decksInfo.B.bpm||'?'} EQ:L${decksInfo.B.eq.low} M${decksInfo.B.eq.mid} H${decksInfo.B.eq.high} Rev:${Math.round(decksInfo.B.reverb*100)}% Del:${Math.round(decksInfo.B.delay*100)}%
-- Crossfader: ${Math.round(crossfade*100)}% → B
-- Automix: ${automixRunning ? 'ACTIVO' : 'inactivo'}
-
-Para aplicar ajustes instantáneos, incluí al final:
-[APPLY:{"deckA":{"eq":{"low":0,"mid":0,"high":0},"reverb":0.0,"delay":0.0},"deckB":{"eq":{"low":0,"mid":0,"high":0},"reverb":0.0,"delay":0.0},"crossfade":0.5}]
-
-Para transición automática (automix), incluí al final:
-[AUTOMIX:{"steps":[
-{"type":"eq","deck":"A","band":"low","value":-8,"description":"Bajo graves del Deck A"},
-{"type":"reverb","deck":"A","value":0.5,"description":"Agrego reverb al Deck A"},
-{"type":"wait","duration":2,"description":"Espero 2 segundos"},
-{"type":"crossfade","from":0.05,"to":0.95,"duration":10,"description":"Transición suave de 10 segundos","label":"transitioning"},
-{"type":"reverb","deck":"A","value":0,"description":"Quito reverb del Deck A"},
-{"type":"eq","deck":"A","band":"low","value":0,"description":"Restauro EQ del Deck A"}
-]}]
-
-Responde en español, máximo 3 párrafos, sé específico y creativo.`;
-
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1000,
-          system,
-          messages: [...messages.filter((_,i)=>i>0).map(m=>({role:m.role,content:m.content})), { role:"user", content:userMsg }]
-        })
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "Error.";
-      const applyMatch = text.match(/\[APPLY:([\s\S]*?)\]/);
-      const automixMatch = text.match(/\[AUTOMIX:([\s\S]*?)\]/);
-      const clean = text.replace(/\[APPLY:[\s\S]*?\]/,"").replace(/\[AUTOMIX:[\s\S]*?\]/,"").trim();
-      let applyData = null, automixData = null;
-      try { if (applyMatch) applyData = JSON.parse(applyMatch[1]); } catch(_) {}
-      try { if (automixMatch) automixData = JSON.parse(automixMatch[1]); } catch(_) {}
-      addMsg(clean, "assistant", { applyData, automixData });
-    } catch(e) { addMsg("Error de conexión."); }
-    setLoading(false);
-  }
-
-  const quickActions = ["Transición suave", "Subir energía", "Mezcla nocturna", "Analizar decks", "Automix ahora"];
-
-  return (
-    <div style={{ background: "#0e0e18", border: "0.5px solid rgba(200,240,68,0.2)", borderRadius: 8, display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      {/* Header */}
-      <div style={{ padding: "10px 14px", borderBottom: "0.5px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ width: 7, height: 7, borderRadius: "50%", background: automixRunning ? "#f59e0b" : "#c8f044", boxShadow: `0 0 6px ${automixRunning ? "#f59e0b" : "#c8f044"}`, animation: "pulse 2s infinite" }} />
-        <span style={{ fontSize: 10, letterSpacing: "2px", color: automixRunning ? "#f59e0b" : "#c8f044", fontWeight: 500 }}>{automixRunning ? "AUTOMIX ACTIVO" : "AI MIXER"}</span>
-        {automixRunning && (
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
-            <div style={{ width: 50, height: 3, background: "rgba(255,255,255,0.1)", borderRadius: 2, overflow: "hidden" }}>
-              <div style={{ width: `${automixProgress}%`, height: "100%", background: "#f59e0b", transition: "width 0.1s", borderRadius: 2 }} />
-            </div>
-            <button onClick={onStopAutomix} style={{ fontSize: 8, padding: "2px 7px", border: "0.5px solid #ff4444", background: "rgba(255,68,68,0.1)", color: "#ff4444", borderRadius: 3, cursor: "pointer", fontFamily: "inherit" }}>STOP</button>
-          </div>
-        )}
-      </div>
-
-      {automixRunning && (
-        <div style={{ padding: "5px 14px", background: "rgba(245,158,11,0.05)", borderBottom: "0.5px solid rgba(245,158,11,0.15)", fontSize: 9, color: "#f59e0b", letterSpacing: "1px" }}>
-          ⚡ {automixPhase?.toUpperCase() || "PROCESANDO"}
-        </div>
-      )}
-
-      {/* Chat */}
-      <div ref={chatRef} style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-        {messages.map((m, i) => (
-          <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start", gap: 4 }}>
-            <div style={{
-              maxWidth: "90%", padding: "8px 11px",
-              borderRadius: m.role === "user" ? "10px 10px 2px 10px" : "10px 10px 10px 2px",
-              background: m.role === "user" ? "rgba(200,240,68,0.1)" : "rgba(255,255,255,0.03)",
-              border: `0.5px solid ${m.role === "user" ? "rgba(200,240,68,0.2)" : "rgba(255,255,255,0.06)"}`,
-              fontSize: 11, lineHeight: 1.65, color: m.role === "user" ? "#c8f044" : "#ccd0e8", whiteSpace: "pre-wrap"
-            }}>{m.content}</div>
-            <div style={{ display: "flex", gap: 5 }}>
-              {m.applyData && (
-                <button onClick={() => onApply(m.applyData)} style={{ fontSize: 9, padding: "3px 8px", borderRadius: 4, border: "0.5px solid rgba(200,240,68,0.4)", background: "rgba(200,240,68,0.08)", color: "#c8f044", cursor: "pointer", fontFamily: "inherit" }}>
-                  ⚡ APLICAR
-                </button>
-              )}
-              {m.automixData && !automixRunning && (
-                <button onClick={() => onAutomix(m.automixData, addMsg)} style={{ fontSize: 9, padding: "3px 8px", borderRadius: 4, border: "0.5px solid rgba(245,158,11,0.4)", background: "rgba(245,158,11,0.08)", color: "#f59e0b", cursor: "pointer", fontFamily: "inherit" }}>
-                  🎛️ INICIAR AUTOMIX
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-        {loading && <div style={{ fontSize: 11, color: "#55576a", fontStyle: "italic" }}>Analizando...</div>}
-      </div>
-
-      {/* Quick actions */}
-      <div style={{ padding: "7px 12px", borderTop: "0.5px solid rgba(255,255,255,0.05)", display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {quickActions.map(q => (
-          <button key={q} onClick={() => setInput(q)} style={{ fontSize: 8, padding: "3px 7px", borderRadius: 10, border: "0.5px solid rgba(255,255,255,0.08)", background: "none", color: "#55576a", cursor: "pointer", fontFamily: "inherit" }}>{q}</button>
-        ))}
-      </div>
-
-      {/* Input */}
-      <div style={{ padding: "8px 12px", borderTop: "0.5px solid rgba(255,255,255,0.06)", display: "flex", gap: 8 }}>
-        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()}
-          placeholder="Pedí una sugerencia..."
-          style={{ flex: 1, background: "rgba(255,255,255,0.04)", border: "0.5px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "7px 10px", fontSize: 11, color: "#dde0f0", outline: "none", fontFamily: "inherit" }}
-        />
-        <button onClick={sendMessage} disabled={loading} style={{ padding: "7px 12px", borderRadius: 6, border: "none", background: loading ? "rgba(200,240,68,0.2)" : "#c8f044", color: "#000", fontSize: 11, fontWeight: 700, cursor: loading ? "default" : "pointer", fontFamily: "inherit" }}>↑</button>
-      </div>
-    </div>
-  );
-}
 
 /* ─── APP ─── */
 export default function App() {
@@ -525,97 +378,11 @@ export default function App() {
     A: { track: null, duration: 0, eq: { low:0, mid:0, high:0 }, reverb: 0, delay: 0, bpm: null },
     B: { track: null, duration: 0, eq: { low:0, mid:0, high:0 }, reverb: 0, delay: 0, bpm: null }
   });
-  const [extOverrides, setExtOverrides] = useState({ A: {}, B: {} });
-
-  // Automix state
-  const [automixRunning, setAutomixRunning] = useState(false);
-  const [automixPhase, setAutomixPhase] = useState(null);
-  const [automixProgress, setAutomixProgress] = useState(0);
-  const automixAbortRef = useRef(false);
 
   function handleCrossfade(val) { setCrossfade(val); engine.setCrossfader(val); }
   function handleDeckInfo(id, info) { setDecksInfo(prev => ({...prev, [id]: info})); }
 
-  function applyExt(deck, patch) { setExtOverrides(prev => ({...prev, [deck]: {...prev[deck], ...patch}})); }
 
-  function handleApply(data) {
-    if (data.deckA) {
-      if (data.deckA.eq) { Object.entries(data.deckA.eq).forEach(([b,v]) => engine.setEQ("A",b,v)); applyExt("A", { eq: data.deckA.eq }); }
-      if (data.deckA.reverb !== undefined) { engine.setReverb("A", data.deckA.reverb); applyExt("A", { reverb: data.deckA.reverb }); }
-      if (data.deckA.delay !== undefined) { engine.setDelay("A", data.deckA.delay); applyExt("A", { delay: data.deckA.delay }); }
-    }
-    if (data.deckB) {
-      if (data.deckB.eq) { Object.entries(data.deckB.eq).forEach(([b,v]) => engine.setEQ("B",b,v)); applyExt("B", { eq: data.deckB.eq }); }
-      if (data.deckB.reverb !== undefined) { engine.setReverb("B", data.deckB.reverb); applyExt("B", { reverb: data.deckB.reverb }); }
-      if (data.deckB.delay !== undefined) { engine.setDelay("B", data.deckB.delay); applyExt("B", { delay: data.deckB.delay }); }
-    }
-    if (data.crossfade !== undefined) handleCrossfade(data.crossfade);
-  }
-
-  async function handleAutomix(plan, addMsg) {
-    automixAbortRef.current = false;
-    setAutomixRunning(true);
-    addMsg("🎛️ **AUTOMIX INICIADO** — ejecutando secuencia...", "assistant");
-
-    for (const step of plan.steps) {
-      if (automixAbortRef.current) break;
-      setAutomixPhase(step.description || step.type);
-
-      if (step.type === "eq") {
-        engine.setEQ(step.deck, step.band, step.value);
-        applyExt(step.deck, { eq: { [step.band]: step.value } });
-        addMsg(`▶ ${step.description}`);
-        await new Promise(r => setTimeout(r, 400));
-      } else if (step.type === "reverb") {
-        engine.setReverb(step.deck, step.value);
-        applyExt(step.deck, { reverb: step.value });
-        addMsg(`▶ ${step.description}`);
-        await new Promise(r => setTimeout(r, 400));
-      } else if (step.type === "delay") {
-        engine.setDelay(step.deck, step.value);
-        applyExt(step.deck, { delay: step.value });
-        addMsg(`▶ ${step.description}`);
-        await new Promise(r => setTimeout(r, 400));
-      } else if (step.type === "wait") {
-        addMsg(`⏱ ${step.description}`);
-        setAutomixProgress(0);
-        const end = Date.now() + step.duration * 1000;
-        await new Promise(resolve => {
-          const tick = setInterval(() => {
-            if (automixAbortRef.current) { clearInterval(tick); resolve(); return; }
-            const remaining = end - Date.now();
-            setAutomixProgress(Math.max(0, Math.min(100, 100 - (remaining / (step.duration * 1000)) * 100)));
-            if (remaining <= 0) { clearInterval(tick); resolve(); }
-          }, 100);
-        });
-      } else if (step.type === "crossfade") {
-        addMsg(`🎚 ${step.description}`);
-        const from = step.from ?? crossfade, to = step.to, duration = step.duration * 1000;
-        const start = Date.now();
-        await new Promise(resolve => {
-          const tick = setInterval(() => {
-            if (automixAbortRef.current) { clearInterval(tick); resolve(); return; }
-            const elapsed = Date.now() - start;
-            const t = Math.min(elapsed / duration, 1);
-            const eased = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
-            const val = from + (to - from) * eased;
-            setCrossfade(val); engine.setCrossfader(val);
-            setAutomixProgress(t * 100);
-            if (t >= 1) { clearInterval(tick); resolve(); }
-          }, 50);
-        });
-      }
-    }
-
-    if (!automixAbortRef.current) {
-      addMsg("✅ **Transición completada.**", "assistant");
-    } else {
-      addMsg("⛔ Automix detenido.", "assistant");
-    }
-    setAutomixRunning(false); setAutomixPhase(null); setAutomixProgress(0);
-  }
-
-  function stopAutomix() { automixAbortRef.current = true; }
 
   const bpmDiff = decksInfo.A.bpm && decksInfo.B.bpm ? Math.abs(decksInfo.A.bpm - decksInfo.B.bpm) : null;
 
@@ -634,37 +401,22 @@ export default function App() {
           <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: 1 }}>
             <span style={{ color: "#c8f044" }}>DJ</span><span style={{ color: "#55576a" }}>.WEB</span>
           </div>
-          <div style={{ fontSize: 10, color: "#55576a" }}>Mixer IA · BPM Detection · Automix</div>
+          <div style={{ fontSize: 10, color: "#55576a" }}>Mixer · BPM Detection</div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14 }}>
             {bpmDiff !== null && (
               <span style={{ fontSize: 9, color: "#55576a" }}>
                 Δ BPM <span style={{ color: bpmDiff < 5 ? "#c8f044" : bpmDiff < 15 ? "#ffaa00" : "#ff4444", fontWeight: 600 }}>{bpmDiff}</span>
               </span>
             )}
-            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: automixRunning ? "#f59e0b" : "#c8f044", boxShadow: `0 0 8px ${automixRunning ? "#f59e0b" : "#c8f044"}`, animation: "pulse 2s infinite" }} />
-              <span style={{ fontSize: 9, color: automixRunning ? "#f59e0b" : "#c8f044", letterSpacing: "2px" }}>{automixRunning ? "AUTOMIX" : "AI ONLINE"}</span>
-            </div>
           </div>
         </header>
 
-        <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 310px", gap: 12, paddingBottom: 16 }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <Deck id="A" engine={engine} crossfade={crossfade} onDeckInfo={handleDeckInfo}
-                extEQ={extOverrides.A.eq} extReverb={extOverrides.A.reverb} extDelay={extOverrides.A.delay} />
-              <Deck id="B" engine={engine} crossfade={crossfade} onDeckInfo={handleDeckInfo}
-                extEQ={extOverrides.B.eq} extReverb={extOverrides.B.reverb} extDelay={extOverrides.B.delay} />
-            </div>
-            <Crossfader value={crossfade} onChange={handleCrossfade} />
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12, paddingBottom: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Deck id="A" engine={engine} crossfade={crossfade} onDeckInfo={handleDeckInfo} />
+            <Deck id="B" engine={engine} crossfade={crossfade} onDeckInfo={handleDeckInfo} />
           </div>
-
-          <AIPanel
-            decksInfo={decksInfo} crossfade={crossfade}
-            onApply={handleApply} onAutomix={handleAutomix}
-            automixRunning={automixRunning} automixPhase={automixPhase}
-            automixProgress={automixProgress} onStopAutomix={stopAutomix}
-          />
+          <Crossfader value={crossfade} onChange={handleCrossfade} />
         </div>
       </div>
     </div>
