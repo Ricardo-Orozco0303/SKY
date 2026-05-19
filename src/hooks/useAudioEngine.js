@@ -107,6 +107,7 @@ export function useAudioEngine() {
       startTime: 0,
       offset: 0,
       isPlaying: false,
+      fadeDuration: 0.45,
     };
 
     return { duration: audioBuffer.duration };
@@ -120,6 +121,11 @@ export function useAudioEngine() {
     const source = ctx.createBufferSource();
     source.buffer = deck.audioBuffer;
     source.connect(deck.low);
+
+    deck.channelGain.gain.cancelScheduledValues(ctx.currentTime);
+    deck.channelGain.gain.setValueAtTime(0, ctx.currentTime);
+    deck.channelGain.gain.linearRampToValueAtTime(1, ctx.currentTime + deck.fadeDuration);
+
     source.start(0, deck.offset);
 
     deck.source = source;
@@ -137,7 +143,15 @@ export function useAudioEngine() {
     if (!deck || !deck.isPlaying) return;
 
     deck.offset += ctx.currentTime - deck.startTime;
-    try { deck.source.stop(); } catch (_) {}
+
+    deck.channelGain.gain.cancelScheduledValues(ctx.currentTime);
+    deck.channelGain.gain.setValueAtTime(deck.channelGain.gain.value, ctx.currentTime);
+    deck.channelGain.gain.linearRampToValueAtTime(0, ctx.currentTime + deck.fadeDuration);
+
+    setTimeout(() => {
+      try { deck.source.stop(); } catch (_) {}
+    }, deck.fadeDuration * 1000);
+
     deck.isPlaying = false;
   }, []);
 
@@ -182,8 +196,13 @@ export function useAudioEngine() {
     // value: 0 = full deck A, 1 = full deck B
     const deckA = decksRef.current['A'];
     const deckB = decksRef.current['B'];
-    if (deckA) deckA.channelGain.gain.value = Math.cos(value * Math.PI / 2);
-    if (deckB) deckB.channelGain.gain.value = Math.cos((1 - value) * Math.PI / 2);
+    const ctx = getCtx();
+    if (deckA) {
+      deckA.channelGain.gain.linearRampToValueAtTime(Math.cos(value * Math.PI / 2), ctx.currentTime + 0.08);
+    }
+    if (deckB) {
+      deckB.channelGain.gain.linearRampToValueAtTime(Math.cos((1 - value) * Math.PI / 2), ctx.currentTime + 0.08);
+    }
   }, []);
 
   const getAnalyser = useCallback((deckId) => {
